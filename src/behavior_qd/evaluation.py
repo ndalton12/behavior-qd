@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from flashlite import Flashlite, RateLimitConfig
-from jinja2 import Environment, FileSystemLoader, select_autoescape
+from jinja2 import Environment, FileSystemLoader, Template, select_autoescape
 from pydantic import BaseModel, Field
 
 from behavior_qd.config import BehaviorQDConfig
@@ -169,7 +169,6 @@ class Evaluator:
         if rubric_path and rubric_path.exists():
             # Use custom rubric
             template_content = rubric_path.read_text()
-            from jinja2 import Template
 
             template = Template(template_content)
             judge_prompt = template.render(
@@ -216,6 +215,7 @@ class Evaluator:
         """
         # Get target response
         response = await self.get_target_response(prompt)
+        print(f"got target response: {response}")
 
         # Judge the interaction
         judge_response = await self.judge_interaction(

@@ -5,7 +5,6 @@ from pathlib import Path
 from typing import Optional
 
 import typer
-from flashlite import DiskCache
 from rich.console import Console
 from rich.table import Table
 
@@ -158,9 +157,6 @@ def run(
             tokens_per_minute=config.rate_limit.tokens_per_minute,
         ),
         track_costs=True,
-        cache=DiskCache(
-            str(output_dir / "cache" / "completions.db"), default_ttl=86400
-        ),
     )
 
     scheduler = BehaviorQDScheduler(config, client=client, console=console)

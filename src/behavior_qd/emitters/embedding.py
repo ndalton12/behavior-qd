@@ -214,6 +214,14 @@ class EmbeddingEmitter(BaseEmitter):
         measures = np.array([m.as_array() for m in feedback.measures])
         objectives = np.array(feedback.objectives)
 
+        # Add solutions to internal archive and get add_info for emitters
+        # pyribs 0.9+ requires solution and add_info in tell()
+        add_info = self._internal_archive.add(
+            solution=self._current_genomes,
+            objective=objectives,
+            measures=measures,
+        )
+
         # Split feedback among emitters
         batch_per_emitter = self.emitter_config.batch_size // self.emitter_config.num_emitters
 
@@ -221,9 +229,16 @@ class EmbeddingEmitter(BaseEmitter):
             start = i * batch_per_emitter
             end = start + batch_per_emitter
 
+            # Slice add_info for this emitter's batch
+            emitter_add_info = {
+                key: val[start:end] for key, val in add_info.items()
+            }
+
             emitter.tell(
+                solution=self._current_genomes[start:end],
                 objective=objectives[start:end],
                 measures=measures[start:end],
+                add_info=emitter_add_info,
             )
 
         # Clear current genomes
@@ -244,15 +259,28 @@ class EmbeddingEmitter(BaseEmitter):
             objectives: Objective scores.
             measures: Measure values.
         """
+        # Add to internal archive to get add_info
+        add_info = self._internal_archive.add(
+            solution=solutions,
+            objective=objectives,
+            measures=measures,
+        )
+
         batch_per_emitter = len(solutions) // self.emitter_config.num_emitters
 
         for i, emitter in enumerate(self._emitters):
             start = i * batch_per_emitter
             end = start + batch_per_emitter
 
+            emitter_add_info = {
+                key: val[start:end] for key, val in add_info.items()
+            }
+
             emitter.tell(
+                solution=solutions[start:end],
                 objective=objectives[start:end],
                 measures=measures[start:end],
+                add_info=emitter_add_info,
             )
 
 

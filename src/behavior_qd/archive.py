@@ -221,20 +221,15 @@ class BehaviorArchive:
 
         return list(status_array)
 
-    def get_elite(self, index: int) -> PromptEntry | None:
-        """Get an elite entry by cell index.
+    def get_elite_by_entry_id(self, entry_id: int) -> PromptEntry | None:
+        """Get an elite entry by its entry ID.
 
         Args:
-            index: Cell index in the archive.
+            entry_id: Entry ID in prompt_data.
 
         Returns:
-            PromptEntry or None if cell is empty.
+            PromptEntry or None if not found.
         """
-        if not self._archive.occupied[index]:
-            return None
-
-        # Get the solution (entry ID) from the archive
-        entry_id = int(self._archive.data("solution")[index][0])
         return self._prompt_data.get(entry_id)
 
     def get_elites(self, n: int | None = None) -> list[PromptEntry]:
@@ -246,26 +241,25 @@ class BehaviorArchive:
         Returns:
             List of PromptEntry sorted by objective (descending).
         """
-        # Get all occupied indices
-        occupied_indices = np.where(self._archive.occupied)[0]
+        # In pyribs 0.9+, iterate directly over archive to get all elites
+        # Each elite is a dict with keys: 'index', 'solution', 'objective', 'measures', 'threshold'
+        elite_data = []
+        for elite in self._archive:
+            entry_id = int(elite["solution"][0])
+            entry = self._prompt_data.get(entry_id)
+            if entry is not None:
+                elite_data.append((elite["objective"], entry))
 
-        if len(occupied_indices) == 0:
+        if not elite_data:
             return []
 
-        # Get objectives for sorting
-        objectives = self._archive.data("objective")[occupied_indices]
-        sorted_indices = occupied_indices[np.argsort(objectives)[::-1]]
+        # Sort by objective (descending)
+        elite_data.sort(key=lambda x: x[0], reverse=True)
 
         if n is not None:
-            sorted_indices = sorted_indices[:n]
+            elite_data = elite_data[:n]
 
-        elites = []
-        for idx in sorted_indices:
-            entry = self.get_elite(int(idx))
-            if entry is not None:
-                elites.append(entry)
-
-        return elites
+        return [entry for _, entry in elite_data]
 
     def sample_elites(self, n: int, seed: int | None = None) -> list[PromptEntry]:
         """Sample n random elites from the archive.
@@ -277,25 +271,18 @@ class BehaviorArchive:
         Returns:
             List of sampled PromptEntry objects.
         """
-        if seed is not None:
-            np.random.seed(seed)
+        # Get all elites first
+        all_elites = self.get_elites()
 
-        occupied_indices = np.where(self._archive.occupied)[0]
-
-        if len(occupied_indices) == 0:
+        if not all_elites:
             return []
 
-        # Sample indices
-        n = min(n, len(occupied_indices))
-        sampled_indices = np.random.choice(occupied_indices, size=n, replace=False)
+        # Sample
+        rng = np.random.default_rng(seed)
+        n = min(n, len(all_elites))
+        indices = rng.choice(len(all_elites), size=n, replace=False)
 
-        elites = []
-        for idx in sampled_indices:
-            entry = self.get_elite(int(idx))
-            if entry is not None:
-                elites.append(entry)
-
-        return elites
+        return [all_elites[i] for i in indices]
 
     @property
     def stats(self) -> dict:

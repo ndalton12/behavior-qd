@@ -16,10 +16,12 @@ def plot_archive_2d(
     title: str = "Archive Heatmap",
     figsize: tuple[int, int] = (10, 8),
     cmap: str = "viridis",
-) -> Figure:
+) -> Figure | None:
     """Plot a 2D heatmap of the archive.
 
     Projects the 3D archive onto 2 specified dimensions.
+    Note: cvt_archive_heatmap only works for 1D or 2D archives.
+    For 3D archives, this returns None.
 
     Args:
         archive: The behavior archive to visualize.
@@ -29,8 +31,15 @@ def plot_archive_2d(
         cmap: Colormap name.
 
     Returns:
-        Matplotlib Figure object.
+        Matplotlib Figure object, or None if archive is 3D.
     """
+    # Check archive dimensionality - cvt_archive_heatmap only works for 1D/2D
+    # In pyribs 0.9+, use measure_dim attribute
+    measure_dim = archive.archive.measure_dim
+    if measure_dim > 2:
+        # Can't use cvt_archive_heatmap for 3D, return None
+        return None
+
     fig, ax = plt.subplots(figsize=figsize)
 
     # Use pyribs CVT heatmap
@@ -247,12 +256,13 @@ def save_all_visualizations(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # 2D heatmap
+    # 2D heatmap (only works for 1D/2D archives)
     fig = plot_archive_2d(archive)
-    fig.savefig(output_dir / "archive_heatmap_2d.png", dpi=150)
-    plt.close(fig)
+    if fig is not None:
+        fig.savefig(output_dir / "archive_heatmap_2d.png", dpi=150)
+        plt.close(fig)
 
-    # 3D scatter
+    # 3D scatter (works for any archive dimensionality)
     fig = plot_archive_3d(archive)
     fig.savefig(output_dir / "archive_scatter_3d.png", dpi=150)
     plt.close(fig)

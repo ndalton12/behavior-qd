@@ -1,1 +1,1 @@
-uv run behavior-qd run "sycophancy" --mode embedding --iterations 3 --rubric rubrics/sycophancy.jinja --coherence --coherence-weight 0.5
+uv run behavior-qd run "sycophancy" --mode embedding --iterations 3 --rubric rubrics/sycophancy.jinja --coherence --coherence-weight 0.5 --device mps
