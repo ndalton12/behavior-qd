@@ -1,0 +1,32 @@
+[project]
+name = "behavior-qd"
+version = "0.1.0"
+description = "Zero-shot behavior elicitation framework using Quality Diversity optimization"
+readme = "README.md"
+authors = [
+    { name = "ndalton12", email = "niall.dalton12@gmail.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "ribs[visualize]>=0.9.0",
+    "flashlite>=0.2.3",
+    "sentence-transformers>=3.0.0",
+    "scikit-learn>=1.5.0",
+    "numpy>=2.0.0",
+    "pydantic>=2.0.0",
+    "pydantic-settings>=2.0.0",
+    "typer>=0.12.0",
+    "rich>=13.0.0",
+    "jinja2>=3.1.0",
+    "torch>=2.0.0",
+]
+
+[project.scripts]
+behavior-qd = "behavior_qd.cli:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/behavior_qd"]
