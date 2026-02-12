@@ -1,25 +1,30 @@
 """Scheduler for orchestrating the QD optimization loop."""
 
-import asyncio
+import csv
 import json
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
-from rich.console import Console
-from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
-from rich.table import Table
-
 from flashlite import Flashlite
+from rich.console import Console
+from rich.progress import (
+    BarColumn,
+    Progress,
+    SpinnerColumn,
+    TaskProgressColumn,
+    TextColumn,
+)
+from rich.table import Table
 
 from behavior_qd.archive import BehaviorArchive
 from behavior_qd.config import BehaviorQDConfig, EmitterMode
-from behavior_qd.embeddings import EmbeddingSpace, Measures
-from behavior_qd.emitters import SamplerEmitter, EmbeddingEmitter
+from behavior_qd.embeddings import EmbeddingSpace
+from behavior_qd.emitters import EmbeddingEmitter, SamplerEmitter
 from behavior_qd.emitters.base import BaseEmitter, EmitterFeedback
 from behavior_qd.emitters.embedding import HybridEmitter
-from behavior_qd.evaluation import Evaluator, EvaluationResult
+from behavior_qd.evaluation import Evaluator
 
 
 @dataclass
@@ -200,9 +205,7 @@ class BehaviorQDScheduler:
         )
 
         # Compute measures and add to archive
-        measures_list = [
-            self.embedding_space.compute_measures(p) for p in prompts
-        ]
+        measures_list = [self.embedding_space.compute_measures(p) for p in prompts]
         objectives = [r.final_score for r in eval_results]
 
         # Add to archive
@@ -280,13 +283,73 @@ class BehaviorQDScheduler:
 
         self.console.print(f"[dim]Saved checkpoint to {checkpoint_path}[/dim]")
 
+    def _seed_archive(self) -> int:
+        """Seed the archive with prompts from a CSV file.
+
+        Returns:
+            Number of prompts successfully added to the archive.
+        """
+        seed_file = self.config.scheduler.seed_file
+        if seed_file is None:
+            return 0
+
+        self.console.print(f"[dim]Loading seed prompts from {seed_file}...[/dim]")
+
+        # Read prompts from CSV
+        prompts = []
+        with open(seed_file, newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            if "prompt" not in reader.fieldnames:
+                self.console.print(
+                    "[red]Error: CSV file must have a 'prompt' column[/red]"
+                )
+                return 0
+            for row in reader:
+                prompt = row["prompt"].strip()
+                if prompt:
+                    prompts.append(prompt)
+
+        if not prompts:
+            self.console.print("[yellow]No prompts found in seed file[/yellow]")
+            return 0
+
+        self.console.print(f"[dim]Evaluating {len(prompts)} seed prompts...[/dim]")
+
+        # Evaluate all seed prompts
+        eval_results = self.evaluator.evaluate_batch_sync(
+            prompts,
+            behavior_description=self.config.behavior_description,
+        )
+
+        # Compute measures and add to archive
+        measures_list = [self.embedding_space.compute_measures(p) for p in prompts]
+        objectives = [r.final_score for r in eval_results]
+
+        # Add to archive
+        statuses = self.archive.add_batch(
+            prompts=prompts,
+            objectives=objectives,
+            measures_list=measures_list,
+            responses=[r.response for r in eval_results],
+            reasonings=[r.reasoning for r in eval_results],
+        )
+
+        # Count additions
+        num_added = sum(1 for s in statuses if int(s) > 0)
+
+        self.console.print(
+            f"[green]Seeded archive with {num_added}/{len(prompts)} prompts[/green]"
+        )
+
+        return num_added
+
     def run(self) -> RunStats:
         """Run the full QD optimization loop.
 
         Returns:
             RunStats with all iteration statistics.
         """
-        self.console.print(f"\n[bold blue]Starting Behavior QD Run[/bold blue]")
+        self.console.print("\n[bold blue]Starting Behavior QD Run[/bold blue]")
         self.console.print(f"Behavior: {self.config.behavior_description}")
         self.console.print(f"Mode: {self.config.scheduler.emitter_mode.value}")
         self.console.print(f"Iterations: {self.config.scheduler.iterations}")
@@ -295,6 +358,12 @@ class BehaviorQDScheduler:
         # Initialize components (triggers lazy loading)
         _ = self.embedding_space
         _ = self.archive
+        _ = self.evaluator  # Initialize evaluator before seeding
+
+        # Seed archive with initial prompts if provided
+        self._seed_archive()
+
+        # Initialize emitter after seeding (so it can use seeded elites)
         _ = self.emitter
 
         self._stats = RunStats()

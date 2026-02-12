@@ -103,6 +103,11 @@ def run(
         "--resume",
         help="Resume from checkpoint",
     ),
+    seed_file: Optional[Path] = typer.Option(
+        None,
+        "--seed",
+        help="CSV file with seed prompts (must have 'prompt' column)",
+    ),
 ):
     """Run a behavior elicitation experiment."""
     # Map mode string to enum
@@ -143,6 +148,9 @@ def run(
 
     if rubric:
         config.judge.rubric_path = rubric
+
+    if seed_file:
+        config.scheduler.seed_file = seed_file
 
     # Import here to avoid slow startup for help commands
     from flashlite import Flashlite

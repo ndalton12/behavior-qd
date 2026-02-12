@@ -17,15 +17,11 @@ class JudgeResponse(BaseModel):
     """Structured response from the judge model."""
 
     behavior_score: float = Field(
-        ge=0.0,
-        le=1.0,
-        description="How well the response exhibits the target behavior (0-1)",
+        description="How well the response exhibits the target behavior (scale defined by rubric)",
     )
     coherence_score: float | None = Field(
         default=None,
-        ge=0.0,
-        le=1.0,
-        description="Grammaticality/coherence of the prompt (0-1)",
+        description="Grammaticality/coherence of the prompt (scale defined by rubric)",
     )
     reasoning: str = Field(
         description="Brief explanation for the scores",
@@ -138,7 +134,11 @@ class Evaluator:
         """
         response = await self.client.complete(
             model=self.config.target.model,
-            messages=[{"role": "user", "content": prompt}],
+            messages=[
+                # TODO: make system prompt evolvable
+                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "user", "content": prompt},
+            ],
             max_tokens=self.config.target.max_tokens,
             temperature=self.config.target.temperature,
         )
@@ -215,7 +215,6 @@ class Evaluator:
         """
         # Get target response
         response = await self.get_target_response(prompt)
-        print(f"got target response: {response}")
 
         # Judge the interaction
         judge_response = await self.judge_interaction(
@@ -266,14 +265,24 @@ class Evaluator:
             max_concurrency=max_concurrency,
         )
 
-        # Build judge prompts
+        # Check for empty responses (likely model refusals)
+        empty_response_indices = set()
+        for i, resp in enumerate(target_responses):
+            if not resp.content:
+                empty_response_indices.add(i)
+
+        # Build judge prompts (only for non-empty responses)
         rubric_path = self.config.judge.rubric_path
         judge_prompts = []
+        valid_indices = []
 
-        for prompt, target_response in zip(prompts, target_responses):
+        for i, (prompt, target_response) in enumerate(zip(prompts, target_responses)):
+            if i in empty_response_indices:
+                continue  # Skip empty responses
+
+            valid_indices.append(i)
             if rubric_path and rubric_path.exists():
                 template_content = rubric_path.read_text()
-                from jinja2 import Template
 
                 template = Template(template_content)
                 judge_prompt = template.render(
@@ -292,33 +301,47 @@ class Evaluator:
                 )
             judge_prompts.append(judge_prompt)
 
-        # Get all judge responses in parallel
+        # Get all judge responses in parallel (only for valid responses)
         judge_requests = [
             {
                 "model": self.config.judge.model,
                 "messages": [{"role": "user", "content": jp}],
                 "response_model": JudgeResponse,
-                # "temperature": 0.0,
             }
             for jp in judge_prompts
         ]
 
-        judge_responses = await self.client.complete_many(
-            judge_requests,
-            max_concurrency=max_concurrency,
-        )
-
-        # Build results
-        results = []
-        for prompt, target_response, judge_response in zip(
-            prompts, target_responses, judge_responses
-        ):
-            result = EvaluationResult.from_judge_response(
-                prompt=prompt,
-                response=target_response.content,
-                judge_response=judge_response,
-                coherence_weight=self.config.judge.coherence_weight,
+        if judge_requests:
+            judge_responses = await self.client.complete_many(
+                judge_requests,
+                max_concurrency=max_concurrency,
             )
+        else:
+            judge_responses = []
+
+        # Build results - map valid judge responses back to original indices
+        judge_response_map = dict(zip(valid_indices, judge_responses))
+
+        results = []
+        for i, (prompt, target_response) in enumerate(zip(prompts, target_responses)):
+            if i in empty_response_indices:
+                # Empty response - create a zero-score result
+                result = EvaluationResult(
+                    prompt=prompt,
+                    response="[MODEL REFUSED/EMPTY RESPONSE]",
+                    behavior_score=0.0,
+                    coherence_score=0.0 if self.config.judge.score_coherence else None,
+                    final_score=0.0,
+                    reasoning="Model returned empty response (likely refusal).",
+                )
+            else:
+                judge_response = judge_response_map[i]
+                result = EvaluationResult.from_judge_response(
+                    prompt=prompt,
+                    response=target_response.content,
+                    judge_response=judge_response,
+                    coherence_weight=self.config.judge.coherence_weight,
+                )
             results.append(result)
 
         return results

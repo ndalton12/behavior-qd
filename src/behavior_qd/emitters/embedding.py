@@ -2,15 +2,14 @@
 
 import numpy as np
 from numpy.typing import NDArray
-from scipy.cluster.vq import kmeans
-
 from ribs.archives import CVTArchive
 from ribs.emitters import EvolutionStrategyEmitter
+from scipy.cluster.vq import kmeans
 
 from behavior_qd.archive import BehaviorArchive
-from behavior_qd.config import EmbeddingEmitterConfig, EmbeddingConfig
+from behavior_qd.config import EmbeddingConfig, EmbeddingEmitterConfig
 from behavior_qd.embeddings import EmbeddingSpace
-from behavior_qd.emitters.base import BaseEmitter, EmitterResult, EmitterFeedback
+from behavior_qd.emitters.base import BaseEmitter, EmitterFeedback, EmitterResult
 
 
 class EmbeddingEmitter(BaseEmitter):
@@ -65,7 +64,7 @@ class EmbeddingEmitter(BaseEmitter):
         ranges = [
             self.archive.config.pca_range,  # PCA dim 1
             self.archive.config.pca_range,  # PCA dim 2
-            self.archive.config.variance_range,  # Token variance
+            self.archive.config.distance_range,  # Token distance traveled
         ]
 
         # Generate centroids
@@ -101,7 +100,8 @@ class EmbeddingEmitter(BaseEmitter):
                 archive=self._internal_archive,  # Use internal archive with genome-sized solutions
                 x0=x0,
                 sigma0=self.emitter_config.sigma0,
-                batch_size=self.emitter_config.batch_size // self.emitter_config.num_emitters,
+                batch_size=self.emitter_config.batch_size
+                // self.emitter_config.num_emitters,
             )
             emitters.append(emitter)
 
@@ -123,18 +123,18 @@ class EmbeddingEmitter(BaseEmitter):
         embed_dim = self.embedding_space.embed_dim
 
         # Random embedding sequence
-        embeddings = self.embedding_space.random_embedding_sequence(
-            max_len, seed=seed
-        )
+        embeddings = self.embedding_space.random_embedding_sequence(max_len, seed=seed)
 
         # Random length parameter (favor medium lengths)
         length_param = np.random.beta(2, 2)  # Peaks around 0.5
 
         # Flatten and concatenate
-        genome = np.concatenate([
-            embeddings.flatten(),
-            [length_param],
-        ]).astype(np.float32)
+        genome = np.concatenate(
+            [
+                embeddings.flatten(),
+                [length_param],
+            ]
+        ).astype(np.float32)
 
         return genome
 
@@ -223,16 +223,16 @@ class EmbeddingEmitter(BaseEmitter):
         )
 
         # Split feedback among emitters
-        batch_per_emitter = self.emitter_config.batch_size // self.emitter_config.num_emitters
+        batch_per_emitter = (
+            self.emitter_config.batch_size // self.emitter_config.num_emitters
+        )
 
         for i, emitter in enumerate(self._emitters):
             start = i * batch_per_emitter
             end = start + batch_per_emitter
 
             # Slice add_info for this emitter's batch
-            emitter_add_info = {
-                key: val[start:end] for key, val in add_info.items()
-            }
+            emitter_add_info = {key: val[start:end] for key, val in add_info.items()}
 
             emitter.tell(
                 solution=self._current_genomes[start:end],
@@ -272,9 +272,7 @@ class EmbeddingEmitter(BaseEmitter):
             start = i * batch_per_emitter
             end = start + batch_per_emitter
 
-            emitter_add_info = {
-                key: val[start:end] for key, val in add_info.items()
-            }
+            emitter_add_info = {key: val[start:end] for key, val in add_info.items()}
 
             emitter.tell(
                 solution=solutions[start:end],
@@ -330,8 +328,7 @@ class HybridEmitter(BaseEmitter):
 
         # Combine prompts
         all_prompts = (
-            self._last_sampler_result.prompts +
-            self._last_embedding_result.prompts
+            self._last_sampler_result.prompts + self._last_embedding_result.prompts
         )
 
         return EmitterResult(

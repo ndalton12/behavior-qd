@@ -23,8 +23,9 @@ class EmbeddingConfig(BaseModel):
         description="Sentence transformer model for embeddings",
     )
     pca_components: int = Field(
-        default=2,
-        description="Number of PCA components for archive measures",
+        default=3,
+        ge=3,
+        description="Number of PCA components (archive uses 2nd and 3rd dimensions)",
     )
     top_k: int = Field(
         default=10,
@@ -59,9 +60,9 @@ class ArchiveConfig(BaseModel):
         default=(-1.0, 1.0),
         description="Range for PCA measure dimensions (normalized)",
     )
-    variance_range: tuple[float, float] = Field(
+    distance_range: tuple[float, float] = Field(
         default=(0.0, 1.0),
-        description="Range for token variance measure dimension",
+        description="Range for token distance-traveled measure dimension",
     )
     seed: int = Field(
         default=42,
@@ -104,7 +105,7 @@ class TargetConfig(BaseModel):
         description="Maximum tokens in target model response",
     )
     temperature: float = Field(
-        default=0.7,
+        default=1.0,
         ge=0.0,
         description="Temperature for target model generation",
     )
@@ -128,6 +129,37 @@ class RateLimitConfig(BaseModel):
         ge=1,
         description="Maximum concurrent API requests",
     )
+
+
+class SamplingStrategy(str, Enum):
+    """Different strategies for generating prompts."""
+
+    STANDARD = "standard"  # Default generation with elite examples
+    ROLEPLAY = "roleplay"  # Generate prompts that ask AI to play a character
+    HYPOTHETICAL = "hypothetical"  # Frame prompts as thought experiments
+    PERSONAL = "personal"  # User shares a personal story/situation
+    SOCRATIC = "socratic"  # Questions that probe through questioning
+    INDIRECT = "indirect"  # Third-person, advice-seeking, or abstract framing
+    EDGE_CASE = "edge_case"  # Extreme, boundary-pushing scenarios
+    MUTATION = "mutation"  # Mutate existing elite prompts
+    ANTI_ELITE = "anti_elite"  # Generate prompts maximally different from elites
+
+
+# Default domains for diversity injection
+DEFAULT_DOMAINS: list[str] = [
+    "workplace and professional life",
+    "family and personal relationships",
+    "health and medical decisions",
+    "financial and economic choices",
+    "political and social issues",
+    "technology and AI",
+    "education and learning",
+    "creative and artistic pursuits",
+    "ethics and moral dilemmas",
+    "science and research",
+    "legal and regulatory matters",
+    "environmental and sustainability",
+]
 
 
 class SamplerConfig(BaseModel):
@@ -155,6 +187,62 @@ class SamplerConfig(BaseModel):
         default=3,
         ge=0,
         description="Number of elite examples to include in sampler prompt",
+    )
+
+    # Strategy settings
+    strategies: list[SamplingStrategy] = Field(
+        default=[
+            SamplingStrategy.STANDARD,
+            SamplingStrategy.ROLEPLAY,
+            SamplingStrategy.HYPOTHETICAL,
+            SamplingStrategy.PERSONAL,
+            SamplingStrategy.SOCRATIC,
+            SamplingStrategy.INDIRECT,
+            SamplingStrategy.EDGE_CASE,
+        ],
+        description="List of strategies to rotate through",
+    )
+    strategy_rotation: bool = Field(
+        default=True,
+        description="Whether to rotate through strategies each iteration",
+    )
+
+    # Domain injection
+    use_domain_injection: bool = Field(
+        default=True,
+        description="Whether to inject random domains for diversity",
+    )
+    domains: list[str] = Field(
+        default_factory=lambda: DEFAULT_DOMAINS.copy(),
+        description="List of domains to inject for topical diversity",
+    )
+
+    # Mutation settings
+    mutation_probability: float = Field(
+        default=0.2,
+        ge=0.0,
+        le=1.0,
+        description="Probability of using mutation mode instead of strategy",
+    )
+    mutation_types: list[str] = Field(
+        default=[
+            "change_domain",
+            "change_framing",
+            "change_tone",
+            "add_context",
+            "simplify",
+            "make_indirect",
+            "escalate",
+        ],
+        description="Types of mutations to apply",
+    )
+
+    # Anti-elite exploration
+    anti_elite_probability: float = Field(
+        default=0.15,
+        ge=0.0,
+        le=1.0,
+        description="Probability of using anti-elite exploration mode",
     )
 
 
@@ -199,6 +287,10 @@ class SchedulerConfig(BaseModel):
         default=1,
         ge=1,
         description="Log progress every N iterations",
+    )
+    seed_file: Path | None = Field(
+        default=None,
+        description="CSV file with seed prompts (must have 'prompt' column)",
     )
 
 

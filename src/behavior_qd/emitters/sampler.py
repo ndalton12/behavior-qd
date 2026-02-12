@@ -1,13 +1,14 @@
 """Sampler emitter using LLM generation with best-of-n selection."""
 
 import asyncio
+import random
 from pathlib import Path
 
 from flashlite import Flashlite
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 from behavior_qd.archive import BehaviorArchive
-from behavior_qd.config import SamplerConfig
+from behavior_qd.config import SamplerConfig, SamplingStrategy
 from behavior_qd.emitters.base import BaseEmitter, EmitterFeedback, EmitterResult
 
 
@@ -16,6 +17,7 @@ class SamplerEmitter(BaseEmitter):
 
     Optionally conditions on elite prompts from the archive (few-shot).
     Uses best-of-n selection based on judge scores.
+    Supports multiple sampling strategies, domain injection, and mutations.
     """
 
     def __init__(
@@ -42,6 +44,10 @@ class SamplerEmitter(BaseEmitter):
         self._template_dir = template_dir or Path(__file__).parent.parent / "templates"
         self._jinja_env: Environment | None = None
 
+        # Strategy rotation state
+        self._iteration_count = 0
+        self._strategy_index = 0
+
     @property
     def client(self) -> Flashlite:
         """Lazily create the flashlite client."""
@@ -64,20 +70,82 @@ class SamplerEmitter(BaseEmitter):
         """Number of prompts generated per ask() call."""
         return self.config.batch_size
 
-    def _render_sampler_prompt(self, elite_examples: list[str] | None = None) -> str:
+    def _select_strategy(self) -> SamplingStrategy:
+        """Select the sampling strategy for this iteration.
+
+        Handles mutation and anti-elite probability checks, then
+        falls back to strategy rotation.
+
+        Returns:
+            The selected SamplingStrategy.
+        """
+        # Check for anti-elite exploration (highest priority special mode)
+        num_elites = self.archive.stats["num_elites"]
+        if (
+            self.config.anti_elite_probability > 0
+            and random.random() < self.config.anti_elite_probability
+            and num_elites > 0  # Need elites to contrast against
+        ):
+            return SamplingStrategy.ANTI_ELITE
+
+        # Check for mutation mode
+        if (
+            self.config.mutation_probability > 0
+            and random.random() < self.config.mutation_probability
+            and num_elites > 0  # Need elites to mutate
+        ):
+            return SamplingStrategy.MUTATION
+
+        # Otherwise, use strategy rotation
+        if self.config.strategy_rotation and self.config.strategies:
+            strategy = self.config.strategies[
+                self._strategy_index % len(self.config.strategies)
+            ]
+            return strategy
+        elif self.config.strategies:
+            # Random selection if rotation disabled
+            return random.choice(self.config.strategies)
+        else:
+            return SamplingStrategy.STANDARD
+
+    def _select_domain(self) -> str | None:
+        """Select a random domain for injection.
+
+        Returns:
+            A domain string, or None if domain injection is disabled.
+        """
+        if not self.config.use_domain_injection or not self.config.domains:
+            return None
+        return random.choice(self.config.domains)
+
+    def _render_sampler_prompt(
+        self,
+        elite_examples: list[str] | None = None,
+        strategy: SamplingStrategy | None = None,
+        domain: str | None = None,
+    ) -> str:
         """Render the sampler prompt template.
 
         Args:
             elite_examples: Optional list of elite prompts for few-shot.
+            strategy: The sampling strategy to use.
+            domain: Optional domain to inject for diversity.
 
         Returns:
             Rendered prompt string.
         """
         template = self.jinja_env.get_template("sampler.jinja")
+
+        # Convert strategy enum to string for template
+        strategy_str = strategy.value if strategy else "standard"
+
         return template.render(
             behavior_description=self.behavior_description,
             elite_examples=elite_examples or [],
             num_prompts=self.config.batch_size,
+            strategy=strategy_str,
+            domain=domain,
+            mutation_types=self.config.mutation_types,
         )
 
     def ask(self) -> EmitterResult:
@@ -90,15 +158,28 @@ class SamplerEmitter(BaseEmitter):
 
     async def _ask_async(self) -> EmitterResult:
         """Async implementation of ask()."""
-        # Get elite examples if configured
+        # Select strategy and domain for this iteration
+        strategy = self._select_strategy()
+        domain = self._select_domain()
+
+        # Get elite examples if configured (or if needed for mutation/anti-elite)
         elite_examples = None
-        if self.config.use_elite_examples and self.config.num_elite_examples > 0:
+        needs_elites = (
+            self.config.use_elite_examples
+            or strategy == SamplingStrategy.MUTATION
+            or strategy == SamplingStrategy.ANTI_ELITE
+        )
+        if needs_elites and self.config.num_elite_examples > 0:
             elites = self.archive.sample_elites(self.config.num_elite_examples)
             if elites:
                 elite_examples = [e.prompt for e in elites]
 
-        # Render the sampler prompt
-        sampler_prompt = self._render_sampler_prompt(elite_examples)
+        # Render the sampler prompt with strategy and domain
+        sampler_prompt = self._render_sampler_prompt(
+            elite_examples=elite_examples,
+            strategy=strategy,
+            domain=domain,
+        )
 
         # Generate prompts using the sampler model
         response = await self.client.complete(
@@ -171,14 +252,17 @@ class SamplerEmitter(BaseEmitter):
     def tell(self, feedback: EmitterFeedback) -> None:
         """Update emitter state based on feedback.
 
-        For the sampler emitter, this is a no-op since the LLM doesn't
-        have persistent state. The archive handles elite selection.
+        Updates the strategy rotation index for the next iteration.
 
         Args:
             feedback: Feedback from evaluating the generated prompts.
         """
-        # Sampler emitter is stateless - archive handles everything
-        pass
+        # Update iteration count and strategy index for rotation
+        self._iteration_count += 1
+        if self.config.strategy_rotation and self.config.strategies:
+            self._strategy_index = (self._strategy_index + 1) % len(
+                self.config.strategies
+            )
 
     async def ask_with_selection(
         self,

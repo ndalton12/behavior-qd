@@ -1,7 +1,7 @@
 """Embedding system for behavior-qd framework.
 
-Handles sentence embeddings, token embeddings, PCA projection on vocab matrix,
-and temperature-based top-k token snapping.
+Handles sentence embeddings, token embeddings, random projection measures,
+PCA projection on vocab matrix, and temperature-based top-k token snapping.
 """
 
 from dataclasses import dataclass
@@ -14,6 +14,9 @@ from sentence_transformers import SentenceTransformer
 from sklearn.decomposition import PCA
 
 from behavior_qd.config import EmbeddingConfig
+
+# Fixed seed for the random projection matrix so measures are deterministic
+_RANDOM_PROJECTION_SEED = 42
 
 
 @dataclass
@@ -34,10 +37,10 @@ class Measures:
 
 
 class EmbeddingSpace:
-    """Manages embeddings, PCA projection, and token snapping.
+    """Manages embeddings, random projection measures, PCA, and token snapping.
 
-    The PCA is fitted on the embedding model's vocabulary matrix, making it
-    deterministic and reproducible for a given model.
+    Archive measures use random projections on sentence embeddings (corpus-free).
+    PCA on the vocabulary matrix is retained for the embedding emitter's token snapping.
     """
 
     def __init__(self, config: EmbeddingConfig | None = None):
@@ -84,6 +87,20 @@ class EmbeddingSpace:
         pca = PCA(n_components=self.config.pca_components)
         pca.fit(self.vocab_embeddings)
         return pca
+
+    @cached_property
+    def random_projection_matrix(self) -> NDArray[np.float32]:
+        """Fixed Gaussian random projection matrix for sentence embedding → 2D.
+
+        Uses a Gaussian random matrix scaled by 1/sqrt(2) per
+        Johnson-Lindenstrauss. Deterministic for a given seed.
+        Prioritizes spread over strict distance preservation.
+        """
+        rng = np.random.default_rng(_RANDOM_PROJECTION_SEED)
+        sentence_dim = self.model.get_sentence_embedding_dimension()
+        matrix = rng.standard_normal((sentence_dim, 2)).astype(np.float32)
+        matrix /= np.sqrt(2)
+        return matrix
 
     @cached_property
     def embed_dim(self) -> int:
@@ -135,8 +152,14 @@ class EmbeddingSpace:
         """Compute archive measures for a prompt.
 
         Measures:
-        - pca_1, pca_2: First 2 PCA components of mean token embedding
-        - variance: Mean variance of token embeddings across dimensions
+        - pca_1, pca_2: Random projection of sentence embedding to 2D,
+          normalized to [-1, 1] via tanh
+        - variance: "Distance traveled" — sum of adjacent Euclidean distances
+          between consecutive token embeddings, normalized via tanh
+
+        Uses sentence-level embedding with a fixed random projection matrix
+        (no corpus fitting needed). The random projection preserves pairwise
+        distances between prompts (Johnson-Lindenstrauss).
 
         Args:
             text: Input prompt text.
@@ -144,20 +167,32 @@ class EmbeddingSpace:
         Returns:
             Measures object with pca_1, pca_2, and variance.
         """
+        # Sentence embedding → random projection for 2D measures
+        sentence_embed = self.encode_sentence(text)  # (sentence_dim,)
+        projected = sentence_embed @ self.random_projection_matrix  # (2,)
+
+        # Normalize to [-1, 1] via tanh so values always fit archive range
+        proj_normalized = np.tanh(projected)
+
+        # "Distance traveled" — sum of Euclidean distances between
+        # consecutive token embeddings. Captures how much the prompt
+        # jumps around in embedding space from token to token.
         token_embeds = self.encode_tokens(text)
+        if len(token_embeds) > 1:
+            diffs = np.diff(token_embeds, axis=0)  # (num_tokens-1, embed_dim)
+            distances = np.linalg.norm(diffs, axis=1)  # (num_tokens-1,)
+            distance_traveled = float(distances.sum())
+        else:
+            distance_traveled = 0.0
 
-        # Mean embedding for PCA projection
-        mean_embed = token_embeds.mean(axis=0, keepdims=True)
-        pca_coords = self.pca.transform(mean_embed)[0]
-
-        # Token variance (scalar) - measures prompt complexity/diversity
-        # Use mean variance across embedding dimensions
-        variance = float(token_embeds.var(axis=0).mean())
+        # Normalize distance traveled to [0, 1] via scaled tanh
+        # Scale factor chosen so typical prompts spread across [0, 1]
+        distance_normalized = float(np.tanh(distance_traveled / 50.0))
 
         return Measures(
-            pca_1=float(pca_coords[0]),
-            pca_2=float(pca_coords[1]),
-            variance=variance,
+            pca_1=float(proj_normalized[0]),
+            pca_2=float(proj_normalized[1]),
+            variance=distance_normalized,
         )
 
     def snap_to_tokens(

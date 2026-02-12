@@ -8,8 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
-from numpy.typing import NDArray
-from ribs.archives import CVTArchive, AddStatus
+from ribs.archives import AddStatus, CVTArchive
 from scipy.cluster.vq import kmeans
 
 from behavior_qd.config import ArchiveConfig
@@ -55,7 +54,7 @@ class BehaviorArchive:
         ranges = [
             config.pca_range,  # PCA dim 1
             config.pca_range,  # PCA dim 2
-            config.variance_range,  # Token variance
+            config.distance_range,  # Token distance traveled
         ]
 
         # Generate centroids using k-means
@@ -166,9 +165,7 @@ class BehaviorArchive:
 
         # Compute measures if not provided
         if measures_list is None:
-            measures_list = [
-                self.embedding_space.compute_measures(p) for p in prompts
-            ]
+            measures_list = [self.embedding_space.compute_measures(p) for p in prompts]
 
         # Default Nones
         if responses is None:
@@ -351,14 +348,16 @@ class BehaviorArchive:
 
         rows = []
         for entry in self.get_elites():
-            rows.append({
-                "prompt": entry.prompt,
-                "objective": entry.objective,
-                "pca_1": entry.measures.pca_1,
-                "pca_2": entry.measures.pca_2,
-                "variance": entry.measures.variance,
-                "response": entry.response,
-                "reasoning": entry.reasoning,
-            })
+            rows.append(
+                {
+                    "prompt": entry.prompt,
+                    "objective": entry.objective,
+                    "pca_1": entry.measures.pca_1,
+                    "pca_2": entry.measures.pca_2,
+                    "variance": entry.measures.variance,
+                    "response": entry.response,
+                    "reasoning": entry.reasoning,
+                }
+            )
 
         return pd.DataFrame(rows)
