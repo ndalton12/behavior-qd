@@ -98,15 +98,42 @@ def run(
         "--device",
         help="Device to use for embedding model",
     ),
+    resume: bool = typer.Option(
+        False,
+        "--resume",
+        help="Resume from latest checkpoint in output directory",
+    ),
     checkpoint: Optional[Path] = typer.Option(
         None,
-        "--resume",
-        help="Resume from checkpoint",
+        "--checkpoint",
+        help="Resume from a specific checkpoint file (single-turn only)",
     ),
     seed_file: Optional[Path] = typer.Option(
         None,
         "--seed",
         help="CSV file with seed prompts (must have 'prompt' column)",
+    ),
+    turns: int = typer.Option(
+        1,
+        "--turns",
+        "-t",
+        help="Number of conversation turns (1 = single-turn, 2+ = multi-turn)",
+    ),
+    num_parents: Optional[int] = typer.Option(
+        None,
+        "--num-parents",
+        help="Number of parent conversations to carry forward per turn "
+        "(default: all elites)",
+    ),
+    continuation_iterations: int = typer.Option(
+        50,
+        "--continuation-iterations",
+        help="QD iterations per continuation turn (Turn 2+)",
+    ),
+    response_max_tokens: int = typer.Option(
+        1024,
+        "--response-max-tokens",
+        help="Max tokens for target responses in Turn 1+ (higher for full responses)",
     ),
 ):
     """Run a behavior elicitation experiment."""
@@ -142,6 +169,13 @@ def run(
     config.rate_limit.tokens_per_minute = tokens_per_minute
     config.rate_limit.max_concurrency = max_concurrency
 
+    # Multi-turn configuration
+    config.multi_turn.num_turns = turns
+    config.multi_turn.response_max_tokens = response_max_tokens
+    config.multi_turn.continuation_iterations = continuation_iterations
+    if num_parents is not None:
+        config.multi_turn.num_parent_conversations = num_parents
+
     # Sampler model (only relevant for sampler/hybrid modes)
     if sampler_model:
         config.sampler.model = sampler_model
@@ -156,8 +190,6 @@ def run(
     from flashlite import Flashlite
     from flashlite import RateLimitConfig as FlashliteRateLimitConfig
 
-    from behavior_qd.scheduler import BehaviorQDScheduler
-
     # Create shared client for rate limiting across all components
     client = Flashlite(
         rate_limit=FlashliteRateLimitConfig(
@@ -167,21 +199,45 @@ def run(
         track_costs=True,
     )
 
-    scheduler = BehaviorQDScheduler(config, client=client, console=console)
+    if turns > 1:
+        # Multi-turn mode
+        from behavior_qd.multi_turn import MultiTurnScheduler
 
-    if checkpoint:
-        stats = scheduler.resume(checkpoint)
+        scheduler = MultiTurnScheduler(config, client=client, console=console)
+
+        if resume or checkpoint:
+            _result = scheduler.resume()  # noqa: F841
+        else:
+            _result = scheduler.run()  # noqa: F841
+
+        scheduler.save_all()
+
+        # Save Turn 0 visualizations
+        if scheduler._turn0_archive:
+            from behavior_qd.visualization import save_all_visualizations
+
+            save_all_visualizations(
+                scheduler._turn0_archive,
+                output_dir / "visualizations" / "turn0",
+            )
     else:
-        stats = scheduler.run()
+        # Single-turn mode (original behavior)
+        from behavior_qd.scheduler import BehaviorQDScheduler
 
-    # Save final visualizations
-    from behavior_qd.visualization import save_all_visualizations
+        single_scheduler = BehaviorQDScheduler(config, client=client, console=console)
 
-    save_all_visualizations(
-        scheduler.archive,
-        output_dir / "visualizations",
-        stats.to_dict()["iterations"],
-    )
+        if resume or checkpoint:
+            stats = single_scheduler.resume(checkpoint)
+        else:
+            stats = single_scheduler.run()
+
+        from behavior_qd.visualization import save_all_visualizations
+
+        save_all_visualizations(
+            single_scheduler.archive,
+            output_dir / "visualizations",
+            stats.to_dict()["iterations"],
+        )
 
     console.print(f"\n[green]Results saved to {output_dir}[/green]")
 
@@ -332,7 +388,7 @@ def visualize(
 def show_prompts(
     checkpoint: Path = typer.Argument(
         ...,
-        help="Path to checkpoint file",
+        help="Path to checkpoint file (Turn 0 .pkl or Turn 2+ continuation .pkl)",
     ),
     n: int = typer.Option(
         10,
@@ -346,9 +402,19 @@ def show_prompts(
         "-e",
         help="Export prompts to file (json, csv, or txt)",
     ),
+    show_conversation: bool = typer.Option(
+        False,
+        "--conversation",
+        help="Show full conversation thread for multi-turn entries",
+    ),
+    full_content: bool = typer.Option(
+        False,
+        "--full",
+        help="Show full content without truncation",
+    ),
 ):
     """Show the best prompts from an archive."""
-    from behavior_qd.archive import BehaviorArchive
+    from behavior_qd.archive import BehaviorArchive, ContinuationArchive
     from behavior_qd.config import EmbeddingConfig
     from behavior_qd.embeddings import EmbeddingSpace
 
@@ -356,30 +422,216 @@ def show_prompts(
 
     with console.status("Loading..."):
         embedding_space = EmbeddingSpace(EmbeddingConfig())
-        archive = BehaviorArchive.load(checkpoint, embedding_space)
+
+        # Try loading as ContinuationArchive first, fall back to BehaviorArchive
+        try:
+            archive = ContinuationArchive.load(checkpoint, embedding_space)
+            is_continuation = True
+        except (KeyError, TypeError):
+            archive = BehaviorArchive.load(checkpoint, embedding_space)
+            is_continuation = False
 
     elites = archive.get_elites(n)
 
-    console.print(f"\n[bold]Top {len(elites)} Prompts:[/bold]\n")
+    label = "Conversations" if is_continuation else "Prompts"
+    console.print(f"\n[bold]Top {len(elites)} {label}:[/bold]\n")
 
     for i, entry in enumerate(elites, 1):
         console.print(f"[bold cyan]{i}. Score: {entry.objective:.3f}[/bold cyan]")
-        console.print(f"   [yellow]{entry.prompt}[/yellow]")
-        if entry.response:
-            response_preview = entry.response[:150].replace("\n", " ")
-            console.print(f"   [dim]Response: {response_preview}...[/dim]")
+
+        if show_conversation and entry.conversation:
+            console.print(
+                f"   [dim](Turn {entry.conversation.num_turns} conversation)[/dim]"
+            )
+            for turn in entry.conversation.turns:
+                role = "User" if turn.role == "user" else "Assistant"
+                content = turn.content
+                if not full_content:
+                    content = content[:200].replace("\n", " ")
+                if turn.role == "user":
+                    console.print(f"   [yellow][{role}]: {content}[/yellow]")
+                else:
+                    console.print(f"   [dim][{role}]: {content}[/dim]")
+        else:
+            prompt_text = entry.prompt
+            if not full_content:
+                prompt_text = prompt_text[:200].replace("\n", " ")
+            console.print(f"   [yellow]{prompt_text}[/yellow]")
+            if entry.response:
+                response_text = entry.response
+                if not full_content:
+                    response_text = response_text[:150].replace("\n", " ") + "..."
+                console.print(f"   [dim]Response: {response_text}[/dim]")
         console.print()
 
     if export:
         from behavior_qd.visualization import export_best_prompts
 
-        # Determine format from extension
         suffix = export.suffix.lower()
         format_map = {".json": "json", ".csv": "csv", ".txt": "txt"}
         fmt = format_map.get(suffix, "json")
 
         export_best_prompts(archive, export, n=n, format=fmt)
         console.print(f"[green]Exported to: {export}[/green]")
+
+
+@app.command("export-conversations")
+def export_conversations(
+    archive_path: Path = typer.Argument(
+        ...,
+        help="Path to archive file (.pkl) — continuation archive, turn1_parents.pkl, "
+        "or behavior archive",
+    ),
+    output: Path = typer.Option(
+        None,
+        "--output",
+        "-o",
+        help="Output file path. Defaults to conversations.json in same directory.",
+    ),
+    n: Optional[int] = typer.Option(
+        None,
+        "--num",
+        "-n",
+        help="Limit to top N conversations by score (default: all)",
+    ),
+    format: str = typer.Option(
+        "json",
+        "--format",
+        "-f",
+        help="Output format: json, jsonl, or txt",
+    ),
+    full_content: bool = typer.Option(
+        False,
+        "--full",
+        help="Include full content without truncation (for txt format)",
+    ),
+):
+    """Export conversations from an archive to a file.
+
+    Supports:
+    - Turn 2+ continuation archives (turnN_archive.pkl, turnN_checkpoint.pkl)
+    - Turn 1 parent conversations (turn1_parents.pkl)
+    - Turn 0 behavior archives (turn0_archive.pkl) — exports as prompt/response pairs
+    """
+    import json
+    import pickle
+
+    from behavior_qd.archive import BehaviorArchive, ContinuationArchive
+    from behavior_qd.config import EmbeddingConfig
+    from behavior_qd.embeddings import EmbeddingSpace
+
+    console.print(f"[bold]Loading:[/bold] {archive_path}")
+
+    # Determine output path
+    if output is None:
+        output = archive_path.parent / "conversations.json"
+
+    entries = []
+    archive_type = "unknown"
+
+    with console.status("Loading archive..."):
+        # Try turn1_parents.pkl (dict of PromptEntry)
+        if "turn1_parents" in archive_path.name:
+            with open(archive_path, "rb") as f:
+                parent_dict = pickle.load(f)
+            entries = list(parent_dict.values())
+            archive_type = "turn1_parents"
+
+        else:
+            # Need embedding space for archive loading
+            embedding_space = EmbeddingSpace(EmbeddingConfig())
+
+            # Try ContinuationArchive first
+            try:
+                archive = ContinuationArchive.load(archive_path, embedding_space)
+                entries = archive.get_elites(n)
+                archive_type = "continuation"
+            except (KeyError, TypeError):
+                # Fall back to BehaviorArchive
+                archive = BehaviorArchive.load(archive_path, embedding_space)
+                entries = archive.get_elites(n)
+                archive_type = "behavior"
+
+    # Sort by objective (descending) and limit
+    entries = sorted(entries, key=lambda e: e.objective, reverse=True)
+    if n is not None:
+        entries = entries[:n]
+
+    console.print(
+        f"[green]Loaded {len(entries)} entries[/green] (archive type: {archive_type})"
+    )
+
+    # Convert to export format
+    conversations_data = []
+    for i, entry in enumerate(entries):
+        conv_data = {
+            "rank": i + 1,
+            "score": entry.objective,
+        }
+
+        if entry.conversation:
+            conv_data["num_turns"] = entry.conversation.num_turns
+            conv_data["turns"] = [
+                {"role": t.role, "content": t.content} for t in entry.conversation.turns
+            ]
+            if entry.conversation.parent_id is not None:
+                conv_data["parent_id"] = entry.conversation.parent_id
+        else:
+            # Single-turn: build conversation from prompt/response
+            conv_data["num_turns"] = 1
+            turns = [{"role": "user", "content": entry.prompt}]
+            if entry.response:
+                turns.append({"role": "assistant", "content": entry.response})
+            conv_data["turns"] = turns
+
+        if entry.reasoning:
+            conv_data["judge_reasoning"] = entry.reasoning
+
+        conversations_data.append(conv_data)
+
+    # Write output
+    output.parent.mkdir(parents=True, exist_ok=True)
+
+    if format == "json":
+        with open(output, "w") as f:
+            json.dump(conversations_data, f, indent=2)
+
+    elif format == "jsonl":
+        with open(output, "w") as f:
+            for conv in conversations_data:
+                f.write(json.dumps(conv) + "\n")
+
+    elif format == "txt":
+        with open(output, "w") as f:
+            for conv in conversations_data:
+                f.write(f"{'=' * 60}\n")
+                f.write(f"Rank: {conv['rank']} | Score: {conv['score']:.3f}\n")
+                f.write(f"Turns: {conv['num_turns']}\n")
+                f.write(f"{'=' * 60}\n\n")
+
+                for turn in conv["turns"]:
+                    role_label = "USER" if turn["role"] == "user" else "ASSISTANT"
+                    content = turn["content"]
+                    if not full_content and len(content) > 500:
+                        content = content[:500] + "... [truncated]"
+                    f.write(f"[{role_label}]\n{content}\n\n")
+
+                if "judge_reasoning" in conv:
+                    reasoning = conv["judge_reasoning"]
+                    if not full_content and len(reasoning) > 300:
+                        reasoning = reasoning[:300] + "..."
+                    f.write(f"[JUDGE REASONING]\n{reasoning}\n\n")
+
+                f.write("\n")
+
+    else:
+        console.print(f"[red]Unknown format: {format}. Use json, jsonl, or txt.[/red]")
+        raise typer.Exit(1)
+
+    console.print(
+        f"[green]Exported {len(conversations_data)} conversations to:[/green]"
+    )
+    console.print(f"  {output}")
 
 
 @app.command("evaluate")

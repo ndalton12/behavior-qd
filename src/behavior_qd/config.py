@@ -56,13 +56,9 @@ class ArchiveConfig(BaseModel):
         ge=100,
         description="Number of CVT cells in the archive",
     )
-    pca_range: tuple[float, float] = Field(
+    dim_range: tuple[float, float] = Field(
         default=(-1.0, 1.0),
-        description="Range for PCA measure dimensions (normalized)",
-    )
-    distance_range: tuple[float, float] = Field(
-        default=(0.0, 1.0),
-        description="Range for token distance-traveled measure dimension",
+        description="Range for embedding projection measure dimensions (normalized via tanh)",
     )
     seed: int = Field(
         default=42,
@@ -266,6 +262,41 @@ class EmbeddingEmitterConfig(BaseModel):
     )
 
 
+class MultiTurnConfig(BaseModel):
+    """Configuration for multi-turn conversation QD."""
+
+    num_turns: int = Field(
+        default=1,
+        ge=1,
+        description="Number of conversation turns (1 = single-turn, current behavior)",
+    )
+    response_max_tokens: int = Field(
+        default=1024,
+        ge=1,
+        description="Max tokens for target responses in Turn 1+ (higher than zero-shot)",
+    )
+    num_parent_conversations: int | None = Field(
+        default=None,
+        description="Number of parent conversations to carry forward from previous turn. "
+        "None = use all elites from previous turn's archive.",
+    )
+    continuation_batch_size: int = Field(
+        default=10,
+        ge=1,
+        description="Number of continuations to generate per iteration",
+    )
+    grid_bins_per_dim: int = Field(
+        default=8,
+        ge=2,
+        description="Number of grid bins per diversity dimension in the continuation archive",
+    )
+    continuation_iterations: int = Field(
+        default=50,
+        ge=1,
+        description="Number of QD iterations per continuation turn (Turn 2+)",
+    )
+
+
 class SchedulerConfig(BaseModel):
     """Configuration for the QD scheduler."""
 
@@ -332,6 +363,7 @@ class BehaviorQDConfig(BaseSettings):
     )
     scheduler: SchedulerConfig = Field(default_factory=SchedulerConfig)
     rate_limit: RateLimitConfig = Field(default_factory=RateLimitConfig)
+    multi_turn: MultiTurnConfig = Field(default_factory=MultiTurnConfig)
 
     def get_output_path(self, filename: str) -> Path:
         """Get path to an output file, creating directory if needed."""

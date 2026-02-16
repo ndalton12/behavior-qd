@@ -68,45 +68,34 @@ def analyze_measure_distribution(
     archive_config: ArchiveConfig,
 ) -> dict:
     """Analyze the distribution of measures."""
-    pca_1_vals = [m.pca_1 for _, m in prompt_measures]
-    pca_2_vals = [m.pca_2 for _, m in prompt_measures]
-    dist_vals = [m.variance for _, m in prompt_measures]
+    dim1_vals = [m.dim1 for _, m in prompt_measures]
+    dim2_vals = [m.dim2 for _, m in prompt_measures]
+
+    dim_range = archive_config.dim_range
 
     stats = {
-        "pca_1": {
-            "min": min(pca_1_vals),
-            "max": max(pca_1_vals),
-            "mean": np.mean(pca_1_vals),
-            "std": np.std(pca_1_vals),
-            "range": archive_config.pca_range,
+        "dim1": {
+            "min": min(dim1_vals),
+            "max": max(dim1_vals),
+            "mean": np.mean(dim1_vals),
+            "std": np.std(dim1_vals),
+            "range": dim_range,
         },
-        "pca_2": {
-            "min": min(pca_2_vals),
-            "max": max(pca_2_vals),
-            "mean": np.mean(pca_2_vals),
-            "std": np.std(pca_2_vals),
-            "range": archive_config.pca_range,
-        },
-        "distance": {
-            "min": min(dist_vals),
-            "max": max(dist_vals),
-            "mean": np.mean(dist_vals),
-            "std": np.std(dist_vals),
-            "range": archive_config.distance_range,
+        "dim2": {
+            "min": min(dim2_vals),
+            "max": max(dim2_vals),
+            "mean": np.mean(dim2_vals),
+            "std": np.std(dim2_vals),
+            "range": dim_range,
         },
     }
 
     # Check how many are out of range
-    pca_range = archive_config.pca_range
-    dist_range = archive_config.distance_range
-
     out_of_range = 0
     for _, m in prompt_measures:
-        if not (pca_range[0] <= m.pca_1 <= pca_range[1]):
+        if not (dim_range[0] <= m.dim1 <= dim_range[1]):
             out_of_range += 1
-        elif not (pca_range[0] <= m.pca_2 <= pca_range[1]):
-            out_of_range += 1
-        elif not (dist_range[0] <= m.variance <= dist_range[1]):
+        elif not (dim_range[0] <= m.dim2 <= dim_range[1]):
             out_of_range += 1
 
     stats["out_of_range_count"] = out_of_range
@@ -164,7 +153,7 @@ def print_measure_stats(stats: dict):
     table.add_column("Archive Range", justify="right")
     table.add_column("In Range?", justify="center")
 
-    for measure_name in ["pca_1", "pca_2", "distance"]:
+    for measure_name in ["dim1", "dim2"]:
         s = stats[measure_name]
         in_range = s["range"][0] <= s["min"] and s["max"] <= s["range"][1]
         table.add_row(
@@ -202,7 +191,7 @@ def print_simulation_results(results: dict):
             for prompt_snippet, score, measures in entries:
                 console.print(
                     f"    - [{score:.2f}] {prompt_snippet}..."
-                    f"\n      measures: ({measures.pca_1:.3f}, {measures.pca_2:.3f}, {measures.variance:.3f})"
+                    f"\n      measures: ({measures.dim1:.3f}, {measures.dim2:.3f})"
                 )
 
 
@@ -212,53 +201,38 @@ def plot_measure_space(
     output_path: Path = Path("output/debug_measures.png"),
 ):
     """Create visualization of the measure space."""
-    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
 
-    pca_1 = [m.pca_1 for _, m in prompt_measures]
-    pca_2 = [m.pca_2 for _, m in prompt_measures]
-    distance = [m.variance for _, m in prompt_measures]
+    dim1 = [m.dim1 for _, m in prompt_measures]
+    dim2 = [m.dim2 for _, m in prompt_measures]
 
-    # Projection space (first 2 dims)
+    # Scatter of dim1 vs dim2
     ax = axes[0]
-    ax.scatter(pca_1, pca_2, alpha=0.6, s=100)
+    ax.scatter(dim1, dim2, alpha=0.6, s=100)
     for i, (prompt, m) in enumerate(prompt_measures):
         ax.annotate(
             str(i),
-            (m.pca_1, m.pca_2),
+            (m.dim1, m.dim2),
             fontsize=8,
             ha="center",
             va="bottom",
         )
     # Draw archive range
-    pca_range = archive_config.pca_range
-    ax.axhline(y=pca_range[0], color="r", linestyle="--", alpha=0.5)
-    ax.axhline(y=pca_range[1], color="r", linestyle="--", alpha=0.5)
-    ax.axvline(x=pca_range[0], color="r", linestyle="--", alpha=0.5)
-    ax.axvline(x=pca_range[1], color="r", linestyle="--", alpha=0.5)
-    ax.set_xlabel("Projection Dim 1")
-    ax.set_ylabel("Projection Dim 2")
+    dim_range = archive_config.dim_range
+    ax.axhline(y=dim_range[0], color="r", linestyle="--", alpha=0.5)
+    ax.axhline(y=dim_range[1], color="r", linestyle="--", alpha=0.5)
+    ax.axvline(x=dim_range[0], color="r", linestyle="--", alpha=0.5)
+    ax.axvline(x=dim_range[1], color="r", linestyle="--", alpha=0.5)
+    ax.set_xlabel("Dim 1")
+    ax.set_ylabel("Dim 2")
     ax.set_title("Sentence Embedding Projection (red = archive bounds)")
 
-    # Projection Dim 1 vs Distance Traveled
+    # Histogram of pairwise distances between prompts
     ax = axes[1]
-    ax.scatter(pca_1, distance, alpha=0.6, s=100)
-    for i, (prompt, m) in enumerate(prompt_measures):
-        ax.annotate(str(i), (m.pca_1, m.variance), fontsize=8, ha="center", va="bottom")
-    dist_range = archive_config.distance_range
-    ax.axhline(y=dist_range[0], color="r", linestyle="--", alpha=0.5)
-    ax.axhline(y=dist_range[1], color="r", linestyle="--", alpha=0.5)
-    ax.axvline(x=pca_range[0], color="r", linestyle="--", alpha=0.5)
-    ax.axvline(x=pca_range[1], color="r", linestyle="--", alpha=0.5)
-    ax.set_xlabel("Projection Dim 1")
-    ax.set_ylabel("Distance Traveled")
-    ax.set_title("Dim 1 vs Distance Traveled")
-
-    # Histogram of distances between prompts
-    ax = axes[2]
     from scipy.spatial.distance import pdist
 
     all_measures = np.array(
-        [[m.pca_1, m.pca_2, m.variance] for _, m in prompt_measures]
+        [[m.dim1, m.dim2] for _, m in prompt_measures]
     )
     if len(all_measures) > 1:
         distances = pdist(all_measures)
@@ -284,17 +258,15 @@ def print_prompt_details(prompt_measures: list[tuple[str, Measures]]):
     """Print detailed info for each prompt."""
     table = Table(title="Prompt Measures")
     table.add_column("#", style="cyan", justify="right")
-    table.add_column("PCA 1", justify="right")
-    table.add_column("PCA 2", justify="right")
-    table.add_column("Dist Traveled", justify="right")
+    table.add_column("Dim 1", justify="right")
+    table.add_column("Dim 2", justify="right")
     table.add_column("Prompt (truncated)", max_width=60)
 
     for i, (prompt, m) in enumerate(prompt_measures):
         table.add_row(
             str(i),
-            f"{m.pca_1:.4f}",
-            f"{m.pca_2:.4f}",
-            f"{m.variance:.4f}",
+            f"{m.dim1:.4f}",
+            f"{m.dim2:.4f}",
             prompt[:60] + "..." if len(prompt) > 60 else prompt,
         )
 

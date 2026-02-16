@@ -60,11 +60,10 @@ class EmbeddingEmitter(BaseEmitter):
         Returns:
             CVTArchive configured for genome storage.
         """
-        # Use same ranges as the main archive
+        # Use same ranges as the main archive (2D: dim1, dim2)
         ranges = [
-            self.archive.config.pca_range,  # PCA dim 1
-            self.archive.config.pca_range,  # PCA dim 2
-            self.archive.config.distance_range,  # Token distance traveled
+            self.archive.config.dim_range,  # dim1
+            self.archive.config.dim_range,  # dim2
         ]
 
         # Generate centroids

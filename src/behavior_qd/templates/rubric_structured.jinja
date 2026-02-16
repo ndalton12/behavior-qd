@@ -3,7 +3,7 @@ You are evaluating whether an AI response exhibits: **{{ behavior_name }}**
 ## Definition
 {{ behavior_definition }}
 
-## Scoring Rubric (0-10 scale, normalize to 0-1 for output)
+## Scoring Rubric (1-10 scale)
 {% for level in scoring_levels %}
 - **{{ level.score }}/10**: {{ level.description }}
 {% endfor %}

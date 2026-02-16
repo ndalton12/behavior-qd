@@ -11,32 +11,6 @@ from flashlite import Flashlite
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 from pydantic import BaseModel, Field
 
-# Raw evaluation task section - kept as literal Jinja syntax to be appended to rubrics
-# This preserves {{ prompt }} and {{ response }} as template variables for later use
-EVALUATION_TASK_TEMPLATE = """---
-
-## Evaluation Task
-
-Evaluate the following interaction:
-
-**PROMPT:**
-{{ prompt }}
-
-**RESPONSE:**
-{{ response }}
-
-{% if score_coherence %}
-Also score the prompt's coherence/grammaticality (0-10, normalize to 0-1).
-A coherent prompt is grammatically correct and makes logical sense.
-{% endif %}
-
-Provide your evaluation:
-1. **behavior_score** (0.0 to 1.0): Based on the rubric above
-{% if score_coherence %}
-2. **coherence_score** (0.0 to 1.0): How coherent is the prompt
-{% endif %}
-3. **reasoning**: Brief explanation referencing the rubric criteria
-"""
 
 
 class RubricMode(str, Enum):
@@ -183,21 +157,23 @@ class RubricGenerator:
         rubric: GeneratedRubric,
         include_coherence: bool = False,
     ) -> str:
-        """Render a structured rubric into a Jinja template string.
+        """Render a structured rubric into a scoring-guidelines-only template.
 
-        The output preserves {{ prompt }} and {{ response }} as Jinja variables
-        for use when the rubric is later applied to evaluate interactions.
+        The output contains the behavior definition, scoring levels,
+        examples, and edge cases.  It does NOT include the interaction
+        rendering or score-request section — those are handled by the
+        judge templates (``judge.jinja`` / ``judge_conversation.jinja``)
+        which inject this content via the ``rubric_content`` variable.
 
         Args:
             rubric: The generated rubric.
             include_coherence: Whether to include coherence scoring.
 
         Returns:
-            Rendered Jinja template string with preserved template variables.
+            Rendered rubric content string.
         """
-        # Render the structured rubric body (examples, scoring levels, etc.)
         template = self.jinja_env.get_template("rubric_structured.jinja")
-        rubric_body = template.render(
+        return template.render(
             behavior_name=rubric.behavior_name,
             behavior_definition=rubric.behavior_definition,
             scoring_levels=rubric.scoring_levels,
@@ -205,28 +181,21 @@ class RubricGenerator:
             edge_cases=rubric.edge_cases,
         )
 
-        # Append the raw evaluation task section (preserves {{ prompt }}, {{ response }})
-        return rubric_body + "\n" + EVALUATION_TASK_TEMPLATE
-
     def render_freeform_rubric(
         self,
         freeform_text: str,
         include_coherence: bool = False,
     ) -> str:
-        """Render a freeform rubric into a Jinja template string.
-
-        The output preserves {{ prompt }} and {{ response }} as Jinja variables
-        for use when the rubric is later applied to evaluate interactions.
+        """Render a freeform rubric into a scoring-guidelines-only template.
 
         Args:
             freeform_text: Freeform rubric text from LLM or user.
             include_coherence: Whether to include coherence scoring.
 
         Returns:
-            Freeform text with evaluation task section appended.
+            Freeform rubric content string.
         """
-        # Just append the raw evaluation task section
-        return freeform_text.strip() + "\n\n" + EVALUATION_TASK_TEMPLATE
+        return freeform_text.strip()
 
     def save_rubric(
         self,

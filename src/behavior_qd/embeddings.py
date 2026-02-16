@@ -21,19 +21,21 @@ _RANDOM_PROJECTION_SEED = 42
 
 @dataclass
 class Measures:
-    """Archive measures for a prompt."""
+    """Archive measures for a prompt.
 
-    pca_1: float
-    pca_2: float
-    variance: float
+    Uses random projection of sentence embeddings to 2D.
+    """
 
-    def as_tuple(self) -> tuple[float, float, float]:
+    dim1: float
+    dim2: float
+
+    def as_tuple(self) -> tuple[float, float]:
         """Return measures as a tuple for pyribs."""
-        return (self.pca_1, self.pca_2, self.variance)
+        return (self.dim1, self.dim2)
 
     def as_array(self) -> NDArray[np.float32]:
         """Return measures as numpy array."""
-        return np.array([self.pca_1, self.pca_2, self.variance], dtype=np.float32)
+        return np.array([self.dim1, self.dim2], dtype=np.float32)
 
 
 class EmbeddingSpace:
@@ -152,10 +154,8 @@ class EmbeddingSpace:
         """Compute archive measures for a prompt.
 
         Measures:
-        - pca_1, pca_2: Random projection of sentence embedding to 2D,
+        - dim1, dim2: Random projection of sentence embedding to 2D,
           normalized to [-1, 1] via tanh
-        - variance: "Distance traveled" — sum of adjacent Euclidean distances
-          between consecutive token embeddings, normalized via tanh
 
         Uses sentence-level embedding with a fixed random projection matrix
         (no corpus fitting needed). The random projection preserves pairwise
@@ -165,7 +165,7 @@ class EmbeddingSpace:
             text: Input prompt text.
 
         Returns:
-            Measures object with pca_1, pca_2, and variance.
+            Measures object with dim1 and dim2.
         """
         # Sentence embedding → random projection for 2D measures
         sentence_embed = self.encode_sentence(text)  # (sentence_dim,)
@@ -174,25 +174,9 @@ class EmbeddingSpace:
         # Normalize to [-1, 1] via tanh so values always fit archive range
         proj_normalized = np.tanh(projected)
 
-        # "Distance traveled" — sum of Euclidean distances between
-        # consecutive token embeddings. Captures how much the prompt
-        # jumps around in embedding space from token to token.
-        token_embeds = self.encode_tokens(text)
-        if len(token_embeds) > 1:
-            diffs = np.diff(token_embeds, axis=0)  # (num_tokens-1, embed_dim)
-            distances = np.linalg.norm(diffs, axis=1)  # (num_tokens-1,)
-            distance_traveled = float(distances.sum())
-        else:
-            distance_traveled = 0.0
-
-        # Normalize distance traveled to [0, 1] via scaled tanh
-        # Scale factor chosen so typical prompts spread across [0, 1]
-        distance_normalized = float(np.tanh(distance_traveled / 50.0))
-
         return Measures(
-            pca_1=float(proj_normalized[0]),
-            pca_2=float(proj_normalized[1]),
-            variance=distance_normalized,
+            dim1=float(proj_normalized[0]),
+            dim2=float(proj_normalized[1]),
         )
 
     def snap_to_tokens(

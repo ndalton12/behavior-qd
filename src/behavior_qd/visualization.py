@@ -12,32 +12,25 @@ from behavior_qd.archive import BehaviorArchive
 
 def plot_archive_2d(
     archive: BehaviorArchive,
-    dims: tuple[int, int] = (0, 1),
     title: str = "Archive Heatmap",
     figsize: tuple[int, int] = (10, 8),
     cmap: str = "viridis",
 ) -> Figure | None:
     """Plot a 2D heatmap of the archive.
 
-    Projects the 3D archive onto 2 specified dimensions.
     Note: cvt_archive_heatmap only works for 1D or 2D archives.
-    For 3D archives, this returns None.
 
     Args:
         archive: The behavior archive to visualize.
-        dims: Which dimensions to plot (0=PCA1, 1=PCA2, 2=variance).
         title: Plot title.
         figsize: Figure size.
         cmap: Colormap name.
 
     Returns:
-        Matplotlib Figure object, or None if archive is 3D.
+        Matplotlib Figure object, or None if archive dimensionality > 2.
     """
-    # Check archive dimensionality - cvt_archive_heatmap only works for 1D/2D
-    # In pyribs 0.9+, use measure_dim attribute
     measure_dim = archive.archive.measure_dim
     if measure_dim > 2:
-        # Can't use cvt_archive_heatmap for 3D, return None
         return None
 
     fig, ax = plt.subplots(figsize=figsize)
@@ -49,38 +42,32 @@ def plot_archive_2d(
         cmap=cmap,
     )
 
-    dim_names = ["PCA Dim 1", "PCA Dim 2", "Token Variance"]
-    ax.set_xlabel(dim_names[dims[0]])
-    ax.set_ylabel(dim_names[dims[1]])
+    ax.set_xlabel("Dim 1")
+    ax.set_ylabel("Dim 2")
     ax.set_title(title)
 
     plt.tight_layout()
     return fig
 
 
-def plot_archive_3d(
+def plot_archive_scatter(
     archive: BehaviorArchive,
-    title: str = "Archive 3D View",
-    figsize: tuple[int, int] = (12, 10),
+    title: str = "Archive Scatter",
+    figsize: tuple[int, int] = (10, 8),
     cmap: str = "viridis",
-    elev: float = 30,
-    azim: float = 45,
 ) -> Figure:
-    """Plot a 3D scatter of the archive.
+    """Plot a 2D scatter of the archive colored by objective.
 
     Args:
         archive: The behavior archive to visualize.
         title: Plot title.
         figsize: Figure size.
         cmap: Colormap name.
-        elev: Elevation angle for 3D view.
-        azim: Azimuth angle for 3D view.
 
     Returns:
         Matplotlib Figure object.
     """
-    fig = plt.figure(figsize=figsize)
-    ax = fig.add_subplot(111, projection="3d")
+    fig, ax = plt.subplots(figsize=figsize)
 
     # Get elite data
     elites = archive.get_elites()
@@ -90,27 +77,23 @@ def plot_archive_3d(
         return fig
 
     # Extract measures and objectives
-    pca1 = [e.measures.pca_1 for e in elites]
-    pca2 = [e.measures.pca_2 for e in elites]
-    variance = [e.measures.variance for e in elites]
+    dim1 = [e.measures.dim1 for e in elites]
+    dim2 = [e.measures.dim2 for e in elites]
     objectives = [e.objective for e in elites]
 
     # Create scatter plot
     scatter = ax.scatter(
-        pca1,
-        pca2,
-        variance,
+        dim1,
+        dim2,
         c=objectives,
         cmap=cmap,
         s=50,
         alpha=0.7,
     )
 
-    ax.set_xlabel("PCA Dim 1")
-    ax.set_ylabel("PCA Dim 2")
-    ax.set_zlabel("Token Variance")
+    ax.set_xlabel("Dim 1")
+    ax.set_ylabel("Dim 2")
     ax.set_title(title)
-    ax.view_init(elev=elev, azim=azim)
 
     plt.colorbar(scatter, ax=ax, label="Objective Score")
     plt.tight_layout()
@@ -196,9 +179,8 @@ def export_best_prompts(
             {
                 "prompt": e.prompt,
                 "objective": e.objective,
-                "pca_1": e.measures.pca_1,
-                "pca_2": e.measures.pca_2,
-                "variance": e.measures.variance,
+                "dim1": e.measures.dim1,
+                "dim2": e.measures.dim2,
                 "response": e.response,
                 "reasoning": e.reasoning,
             }
@@ -213,15 +195,14 @@ def export_best_prompts(
         with open(output_path, "w", newline="") as f:
             writer = csv.writer(f)
             writer.writerow([
-                "prompt", "objective", "pca_1", "pca_2", "variance", "response", "reasoning"
+                "prompt", "objective", "dim1", "dim2", "response", "reasoning"
             ])
             for e in elites:
                 writer.writerow([
                     e.prompt,
                     e.objective,
-                    e.measures.pca_1,
-                    e.measures.pca_2,
-                    e.measures.variance,
+                    e.measures.dim1,
+                    e.measures.dim2,
                     e.response or "",
                     e.reasoning or "",
                 ])
@@ -262,9 +243,9 @@ def save_all_visualizations(
         fig.savefig(output_dir / "archive_heatmap_2d.png", dpi=150)
         plt.close(fig)
 
-    # 3D scatter (works for any archive dimensionality)
-    fig = plot_archive_3d(archive)
-    fig.savefig(output_dir / "archive_scatter_3d.png", dpi=150)
+    # 2D scatter colored by objective
+    fig = plot_archive_scatter(archive)
+    fig.savefig(output_dir / "archive_scatter.png", dpi=150)
     plt.close(fig)
 
     # History plots if available

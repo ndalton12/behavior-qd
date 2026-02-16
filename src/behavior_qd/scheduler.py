@@ -109,6 +109,7 @@ class BehaviorQDScheduler:
         # Run state
         self._stats = RunStats()
         self._iteration = 0
+        self._resume_iteration = 0
 
     @property
     def embedding_space(self) -> EmbeddingSpace:
@@ -346,27 +347,51 @@ class BehaviorQDScheduler:
     def run(self) -> RunStats:
         """Run the full QD optimization loop.
 
+        Supports both fresh runs and resumed runs.  When ``_resume_iteration``
+        is > 0 (set by :meth:`resume`), the seed step is skipped, existing
+        stats are preserved, and the loop starts from the resume point.
+
         Returns:
             RunStats with all iteration statistics.
         """
+        is_resume = self._resume_iteration > 0
+        total_iterations = self.config.scheduler.iterations
+        start_iter = self._resume_iteration
+        remaining = total_iterations - start_iter
+
         self.console.print("\n[bold blue]Starting Behavior QD Run[/bold blue]")
         self.console.print(f"Behavior: {self.config.behavior_description}")
         self.console.print(f"Mode: {self.config.scheduler.emitter_mode.value}")
-        self.console.print(f"Iterations: {self.config.scheduler.iterations}")
+        if is_resume:
+            self.console.print(
+                f"[bold yellow]Resuming from iteration {start_iter} "
+                f"({remaining} remaining of {total_iterations})[/bold yellow]"
+            )
+        else:
+            self.console.print(f"Iterations: {total_iterations}")
         self.console.print()
+
+        if remaining <= 0:
+            self.console.print(
+                "[yellow]Already at or past target iterations — nothing to do[/yellow]"
+            )
+            if self._stats.end_time is None:
+                self._stats.end_time = datetime.now()
+            self._print_summary()
+            return self._stats
 
         # Initialize components (triggers lazy loading)
         _ = self.embedding_space
         _ = self.archive
         _ = self.evaluator  # Initialize evaluator before seeding
 
-        # Seed archive with initial prompts if provided
-        self._seed_archive()
+        if not is_resume:
+            # Only seed and reset stats for fresh runs
+            self._seed_archive()
+            self._stats = RunStats()
 
         # Initialize emitter after seeding (so it can use seeded elites)
         _ = self.emitter
-
-        self._stats = RunStats()
 
         with Progress(
             SpinnerColumn(),
@@ -376,12 +401,12 @@ class BehaviorQDScheduler:
             console=self.console,
         ) as progress:
             task = progress.add_task(
-                "Running QD optimization...",
-                total=self.config.scheduler.iterations,
+                f"{'Resuming' if is_resume else 'Running'} QD optimization...",
+                total=remaining,
             )
 
-            for i in range(self.config.scheduler.iterations):
-                self._iteration = i + 1
+            for i in range(remaining):
+                self._iteration = start_iter + i + 1
 
                 # Run iteration
                 stats = self._run_iteration()
@@ -390,11 +415,11 @@ class BehaviorQDScheduler:
                 self._stats.total_cost = stats.total_cost
 
                 # Log if needed
-                if i % self.config.scheduler.log_interval == 0:
+                if self._iteration % self.config.scheduler.log_interval == 0:
                     self._log_iteration(stats)
 
                 # Checkpoint if needed
-                if (i + 1) % self.config.scheduler.checkpoint_interval == 0:
+                if self._iteration % self.config.scheduler.checkpoint_interval == 0:
                     self._save_checkpoint()
 
                 progress.update(task, advance=1)
@@ -406,6 +431,9 @@ class BehaviorQDScheduler:
 
         # Print summary
         self._print_summary()
+
+        # Reset resume state so a second call to run() starts fresh
+        self._resume_iteration = 0
 
         return self._stats
 
@@ -428,8 +456,13 @@ class BehaviorQDScheduler:
         table.add_row("Mean Objective", f"{stats['obj_mean']:.3f}")
         table.add_row("Total Cost", f"${self._stats.total_cost:.4f}")
 
-        duration = (self._stats.end_time - self._stats.start_time).total_seconds()
-        table.add_row("Total Duration", f"{duration:.1f}s")
+        if self._stats.end_time is not None:
+            duration = (
+                self._stats.end_time - self._stats.start_time
+            ).total_seconds()
+            table.add_row("Total Duration", f"{duration:.1f}s")
+        else:
+            table.add_row("Total Duration", "–")
 
         self.console.print(table)
 
@@ -441,26 +474,88 @@ class BehaviorQDScheduler:
             if entry.reasoning:
                 self.console.print(f"   [dim]{entry.reasoning[:100]}...[/dim]")
 
-    def resume(self, checkpoint_path: Path | str) -> RunStats:
+    def resume(self, checkpoint_path: Path | str | None = None) -> RunStats:
         """Resume from a checkpoint.
 
         Args:
-            checkpoint_path: Path to checkpoint file.
+            checkpoint_path: Path to checkpoint file.  When *None*, the latest
+                ``checkpoint_iter*.pkl`` in the output directory is used.
 
         Returns:
             RunStats continuing from checkpoint.
         """
-        self.console.print(f"[dim]Loading checkpoint from {checkpoint_path}...[/dim]")
+        if checkpoint_path is None:
+            checkpoint_path = self._find_latest_checkpoint()
+            if checkpoint_path is None:
+                self.console.print(
+                    "[yellow]No checkpoint found, starting fresh[/yellow]"
+                )
+                return self.run()
+
+        checkpoint_path = Path(checkpoint_path)
+        self.console.print(
+            f"[dim]Loading checkpoint from {checkpoint_path}...[/dim]"
+        )
         self._archive = BehaviorArchive.load(checkpoint_path, self.embedding_space)
 
-        # Load stats if available
-        stats_path = self.config.get_output_path("stats.json")
-        if stats_path.exists():
-            with open(stats_path) as f:
-                data = json.load(f)
-                self._stats.iterations = [
-                    IterationStats(**s) for s in data["iterations"]
-                ]
-                self._iteration = len(self._stats.iterations)
+        # Try to load stats from the checkpoint's directory, then output dir
+        stats_loaded = False
+        for search_dir in [checkpoint_path.parent, self.config.output_dir]:
+            stats_path = search_dir / "stats.json"
+            if stats_path.exists():
+                with open(stats_path) as f:
+                    data = json.load(f)
+                    self._stats = RunStats()
+                    self._stats.iterations = [
+                        IterationStats(**s) for s in data["iterations"]
+                    ]
+                    self._stats.total_evaluations = sum(
+                        s.num_evaluated for s in self._stats.iterations
+                    )
+                    if data.get("total_cost"):
+                        self._stats.total_cost = data["total_cost"]
+                    if data.get("start_time"):
+                        self._stats.start_time = datetime.fromisoformat(
+                            data["start_time"]
+                        )
+                    if data.get("end_time"):
+                        self._stats.end_time = datetime.fromisoformat(
+                            data["end_time"]
+                        )
+                    self._resume_iteration = len(self._stats.iterations)
+                    stats_loaded = True
+                    break
+
+        if not stats_loaded:
+            # Fall back: infer iteration from checkpoint filename
+            import re
+
+            match = re.search(r"checkpoint_iter(\d+)", checkpoint_path.name)
+            if match:
+                self._resume_iteration = int(match.group(1))
+            else:
+                self.console.print(
+                    "[yellow]Could not determine iteration from checkpoint — "
+                    "starting from iteration 0[/yellow]"
+                )
+                self._resume_iteration = 0
+
+        self.console.print(
+            f"[green]Loaded checkpoint: "
+            f"{self.archive.stats['num_elites']} elites, "
+            f"resuming from iteration {self._resume_iteration}[/green]"
+        )
 
         return self.run()
+
+    def _find_latest_checkpoint(self) -> Path | None:
+        """Find the most recent ``checkpoint_iter*.pkl`` in the output dir."""
+        output_dir = self.config.output_dir
+        if not output_dir.exists():
+            return None
+
+        checkpoints = sorted(
+            output_dir.glob("checkpoint_iter*.pkl"),
+            key=lambda p: p.stat().st_mtime,
+        )
+        return checkpoints[-1] if checkpoints else None
